@@ -59,7 +59,7 @@ struct ncac {
         const char *name;           /**< Group name. */
         char **users;               /**< Array of users belonging to this group. */
         uint32_t user_count;        /**< Number of users. */
-    } *groups;                      /**< Array of existing groups. */
+    } *groups;                      /**< Sorted array of existing groups. */
     uint32_t group_count;           /**< Number of groups. */
 
     /**
@@ -67,7 +67,7 @@ struct ncac {
      */
     struct ncac_rule_list {
         const char *name;           /**< Rule list name. */
-        char **groups;              /**< All groups associated with this rule list. */
+        char **groups;              /**< Sorted all groups associated with this rule list. */
         uint32_t group_count;       /**< Number of groups. */
 
         /**
@@ -87,7 +87,7 @@ struct ncac {
         struct ncac_rule_list *next;    /**< Pointer to the next rule list. */
     } *rule_lists;                  /**< List of all the rule lists. */
 
-    pthread_mutex_t lock;
+    pthread_mutex_t lock;           /**< Lock for accessing all the NACM members. */
 };
 
 enum ncac_access {

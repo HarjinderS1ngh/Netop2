@@ -2,7 +2,8 @@
 
 [![BSD license](https://img.shields.io/badge/License-BSD-blue.svg)](https://opensource.org/licenses/BSD-3-Clause)
 [![Build Status](https://secure.travis-ci.org/CESNET/Netopeer2.png?branch=master)](http://travis-ci.org/CESNET/Netopeer2)
-[![Coverity Scan Build Status](https://scan.coverity.com/projects/8416/badge.svg)](https://scan.coverity.com/projects/8416)
+[![Coverity](https://scan.coverity.com/projects/8416/badge.svg)](https://scan.coverity.com/projects/8416)
+[![Codecov](https://codecov.io/gh/CESNET/netopeer2/branch/master/graph/badge.svg?token=ue4DTHDcuq)](https://codecov.io/gh/CESNET/netopeer2)
 [![Ohloh Project Status](https://www.openhub.net/p/Netopeer2/widgets/project_thin_badge.gif)](https://www.openhub.net/p/Netopeer2)
 
 **Netopeer2** is a server for implementing network configuration management based
@@ -33,6 +34,14 @@ and it occurs on the `master` branch, the **first response will likely be** to u
 * [libyang](https://github.com/CESNET/libyang)
 * [libnetconf2](https://github.com/CESNET/libnetconf2)
 * [sysrepo](https://github.com/sysrepo/sysrepo)
+
+### Optional
+
+* cmocka >= 1.0.0 (for [tests](#Tests))
+* valgrind (for enhanced testing)
+* gcov (for code coverage)
+* lcov (for code coverage)
+* genhtml (for code coverage)
 
 ## RFC Compliance
 
@@ -112,6 +121,42 @@ A command-line NETCONF client `netopeer2-cli` is included and build/installed by
 adjusted by an option:
 ```
 BUILD_CLI:ON
+```
+
+### Tests
+
+There are several tests included and built with [cmocka](https://cmocka.org/). The tests
+can be found in `tests` subdirectory and they are designed for checking library
+functionality after code changes.
+
+The tests are by default built in the `Debug` build mode by running
+```
+$ make
+```
+
+In case of the `Release` mode, the tests are not built by default (it requires
+additional dependency), but they can be enabled via cmake option:
+```
+$ cmake -DENABLE_TESTS=ON ..
+```
+
+Note that if the necessary [cmocka](https://cmocka.org/) headers are not present
+in the system include paths, tests are not available despite the build mode or
+cmake's options.
+
+Tests can be run by the make's `test` target:
+```
+$ make test
+```
+
+### Code Coverage
+
+Based on the tests run, it is possible to generate code coverage report. But
+it must be enabled and these commands are needed to generate the report:
+```
+$ cmake -DENABLE_COVERAGE=ON ..
+$ make
+$ make coverage
 ```
 
 ## NACM

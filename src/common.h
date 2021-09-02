@@ -37,6 +37,9 @@
 #define NP_IGNORE_RPC(session, event) (!sr_session_get_orig_name(session) || \
         strcmp(sr_session_get_orig_name(session), "netopeer2") || (event == SR_EV_ABORT))
 
+/* macro to check if SR callback was originated by netopeer2 */
+#define NP_IS_ORIG_NP(session) (sr_session_get_orig_name(session) && !strcmp(sr_session_get_orig_name(session), "netopeer2"))
+
 /* user session structure assigned as data of NC sessions */
 struct np2_user_sess {
     sr_session_ctx_t *sess;
@@ -66,15 +69,15 @@ extern ATOMIC_T skip_nacm_nc_sid;
 
 int np_sleep(uint32_t ms);
 
-struct timespec np_gettimespec(void);
+struct timespec np_gettimespec(int force_real);
 
-int32_t np_difftimespec(const struct timespec *ts1, const struct timespec *ts2);
+int64_t np_difftimespec(const struct timespec *ts1, const struct timespec *ts2);
 
 void np_addtimespec(struct timespec *ts, uint32_t msec);
 
 struct timespec np_modtimespec(const struct timespec *ts, uint32_t msec);
 
-struct nc_session *np_get_nc_sess_by_sr_id(uint32_t sr_id);
+int np_get_nc_sess_by_id(uint32_t sr_id, uint32_t nc_id, struct nc_session **nc_sess);
 
 int np_get_user_sess(sr_session_ctx_t *ev_sess, struct nc_session **nc_sess, struct np2_user_sess **user_sess);
 
@@ -92,7 +95,7 @@ int np2srv_url_setcap(void);
 
 struct lyd_node *op_parse_url(const char *url, uint32_t parse_options, int *rc, sr_session_ctx_t *sr_sess);
 
-int op_export_url(const char *url, struct lyd_node *data, int options, int *rc, sr_session_ctx_t *sr_sess);
+int op_export_url(const char *url, struct lyd_node *data, uint32_t options, int *rc, sr_session_ctx_t *sr_sess);
 
 #endif
 

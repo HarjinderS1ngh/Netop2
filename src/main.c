@@ -315,9 +315,11 @@ np2srv_rpc_cb(struct lyd_node *rpc, struct nc_session *ncs)
         free(str);
 
         /* set message */
-        asprintf(&str, "Executing the operation is denied because \"%s\" NACM authorization failed.", nc_session_get_username(ncs));
-        nc_err_set_msg(e, str, "en");
-        free(str);
+        if (asprintf(&str, "Executing the operation is denied because \"%s\" NACM authorization failed.",
+                nc_session_get_username(ncs)) > -1) {
+            nc_err_set_msg(e, str, "en");
+            free(str);
+        }
 
         return nc_server_reply_err(e);
     }
@@ -488,13 +490,18 @@ server_init(void)
     const struct ly_ctx *ly_ctx;
     int rc;
 
-    /* connect to the sysrepo and set edit-config NACM diff check callback */
+    /* connect to sysrepo */
     rc = sr_connect(SR_CONN_CACHE_RUNNING, &np2srv.sr_conn);
     if (rc != SR_ERR_OK) {
         ERR("Connecting to sysrepo failed (%s).", sr_strerror(rc));
         goto error;
     }
-    sr_set_diff_check_callback(np2srv.sr_conn, np2srv_diff_check_cb);
+
+    /* set edit-config NACM diff check callback */
+    rc = sr_set_diff_check_callback(np2srv.sr_conn, np2srv_diff_check_cb);
+    if (rc != SR_ERR_OK) {
+        WRN("Unable to set diff check callback (%s), NACM will not be applied when editing data.", sr_strerror(rc));
+    }
 
     ly_ctx = sr_get_context(np2srv.sr_conn);
 
@@ -1209,7 +1216,7 @@ main(int argc, char *argv[])
     close(pidfd);
 
     /* set printer callbacks for the used libraries and set proper log levels */
-    nc_set_print_clb(np2log_cb_nc2); /* libnetconf2 */
+    nc_set_print_clb_session(np2log_cb_nc2); /* libnetconf2 */
     ly_set_log_clb(np2log_cb_ly, 1); /* libyang */
     sr_log_set_cb(np2log_cb_sr); /* sysrepo, log level is checked by callback */
 

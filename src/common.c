@@ -57,17 +57,21 @@ np_sleep(uint32_t ms)
 }
 
 struct timespec
-np_gettimespec(void)
+np_gettimespec(int force_real)
 {
     struct timespec ts;
 
-    clock_gettime(NP_CLOCK_ID, &ts);
+    if (force_real) {
+        clock_gettime(CLOCK_REALTIME, &ts);
+    } else {
+        clock_gettime(NP_CLOCK_ID, &ts);
+    }
 
     return ts;
 }
 
 /* ts1 < ts2 -> +, ts1 > ts2 -> -, returns milliseconds */
-int32_t
+int64_t
 np_difftimespec(const struct timespec *ts1, const struct timespec *ts2)
 {
     int64_t nsec_diff = 0;
@@ -113,40 +117,59 @@ np_modtimespec(const struct timespec *ts, uint32_t msec)
     return ret;
 }
 
-struct nc_session *
-np_get_nc_sess_by_sr_id(uint32_t sr_id)
+int
+np_get_nc_sess_by_id(uint32_t sr_id, uint32_t nc_id, struct nc_session **nc_sess)
 {
     uint32_t i;
-    struct nc_session *ncs;
+    struct nc_session *ncs = NULL;
     struct np2_user_sess *user_sess;
 
+    assert((sr_id && !nc_id) || (!sr_id && nc_id));
+
     for (i = 0; (ncs = nc_ps_get_session(np2srv.nc_ps, i)); ++i) {
-        user_sess = nc_session_get_data(ncs);
-        if (sr_session_get_id(user_sess->sess) == sr_id) {
-            break;
+        if (sr_id) {
+            user_sess = nc_session_get_data(ncs);
+            if (sr_session_get_id(user_sess->sess) == sr_id) {
+                break;
+            }
+        } else {
+            if (nc_session_get_id(ncs) == nc_id) {
+                break;
+            }
         }
     }
 
-    return ncs;
+    if (!ncs) {
+        if (nc_id) {
+            ERR("Failed to find NETCONF session with NC ID %u.", nc_id);
+        }
+        return SR_ERR_INTERNAL;
+    }
+
+    *nc_sess = ncs;
+    return SR_ERR_OK;
 }
 
 int
 np_get_user_sess(sr_session_ctx_t *ev_sess, struct nc_session **nc_sess, struct np2_user_sess **user_sess)
 {
     struct np2_user_sess *us;
-    uint32_t i, *nc_id, size;
+    const char *orig_name;
+    uint32_t *nc_id, size;
     struct nc_session *ncs;
+    int rc;
+
+    orig_name = sr_session_get_orig_name(ev_sess);
+    if (!orig_name || strcmp(orig_name, "netopeer2")) {
+        ERR("Unknown originator name \"%s\" in event session.", orig_name);
+        return SR_ERR_INTERNAL;
+    }
 
     sr_session_get_orig_data(ev_sess, 0, &size, (const void **)&nc_id);
 
-    for (i = 0; (ncs = nc_ps_get_session(np2srv.nc_ps, i)); ++i) {
-        if (nc_session_get_id(ncs) == *nc_id) {
-            break;
-        }
-    }
-    if (!ncs) {
-        ERR("Failed to find NETCONF session SID %u.", *nc_id);
-        return SR_ERR_INTERNAL;
+    rc = np_get_nc_sess_by_id(0, *nc_id, &ncs);
+    if (rc) {
+        return rc;
     }
 
     /* NETCONF session */
@@ -441,6 +464,7 @@ op_parse_url(const char *url, uint32_t parse_options, int *rc, sr_session_ctx_t 
 {
     struct lyd_node *config, *data;
     struct ly_ctx *ly_ctx;
+    struct lyd_node_opaq *opaq;
     int fd;
 
     ly_ctx = (struct ly_ctx *)sr_get_context(np2srv.sr_conn);
@@ -452,20 +476,35 @@ op_parse_url(const char *url, uint32_t parse_options, int *rc, sr_session_ctx_t 
         return NULL;
     }
 
-    /* do not validate the whole context, we just want to load the config anyxml */
-    if (lyd_parse_data_fd(ly_ctx, fd, LYD_XML, LYD_PARSE_ONLY | LYD_PARSE_OPAQ | LYD_PARSE_NO_STATE, 0, &config)) {
+    /* load the whole config element */
+    if (lyd_parse_data_fd(ly_ctx, fd, LYD_XML, parse_options, 0, &config)) {
         *rc = SR_ERR_LY;
         sr_session_set_error_message(sr_sess, ly_errmsg(ly_ctx));
         return NULL;
     }
 
-    data = op_parse_config((struct lyd_node_any *)config, parse_options, rc, sr_sess);
-    lyd_free_siblings(config);
+    if (!config || config->schema) {
+        *rc = SR_ERR_UNSUPPORTED;
+        sr_session_set_error_message(sr_sess, "Missing top-level \"config\" element in URL data.");
+        return NULL;
+    }
+
+    opaq = (struct lyd_node_opaq *)config;
+    if (strcmp(opaq->name.name, "config") || strcmp(opaq->name.module_ns, "urn:ietf:params:xml:ns:netconf:base:1.0")) {
+        *rc = SR_ERR_UNSUPPORTED;
+        sr_session_set_error_message(sr_sess, "Invalid top-level element in URL data, expected \"config\" with "
+                "namespace \"urn:ietf:params:xml:ns:netconf:base:1.0\".");
+        return NULL;
+    }
+
+    data = opaq->child;
+    lyd_unlink_siblings(data);
+    lyd_free_tree(config);
     return data;
 }
 
 int
-op_export_url(const char *url, struct lyd_node *data, int options, int *rc, sr_session_ctx_t *sr_sess)
+op_export_url(const char *url, struct lyd_node *data, uint32_t options, int *rc, sr_session_ctx_t *sr_sess)
 {
     CURL *curl;
     CURLcode res;
@@ -477,15 +516,18 @@ op_export_url(const char *url, struct lyd_node *data, int options, int *rc, sr_s
     ly_ctx = (struct ly_ctx *)sr_get_context(np2srv.sr_conn);
 
     /* print the config as expected by the other end */
-    if (lyd_new_path2(NULL, ly_ctx, "/ietf-netconf:config", data, 0, data ? LYD_ANYDATA_DATATREE : 0, 0, NULL, &config)) {
+    if (lyd_new_opaq2(NULL, ly_ctx, "config", NULL, NULL, "urn:ietf:params:xml:ns:netconf:base:1.0", &config)) {
         *rc = SR_ERR_LY;
         sr_session_set_error_message(sr_sess, ly_errmsg(ly_ctx));
         return -1;
     }
+    if (data) {
+        lyd_insert_child(config, data);
+    }
     lyd_print_mem(&str_data, config, LYD_XML, options);
 
     /* do not free data */
-    ((struct lyd_node_any *)config)->value.tree = NULL;
+    lyd_unlink_siblings(data);
     lyd_free_tree(config);
 
     DBG("Uploading file to URL: %s (via curl)", url);
@@ -535,6 +577,8 @@ op_parse_config(struct lyd_node_any *config, uint32_t parse_options, int *rc, sr
     const struct ly_ctx *ly_ctx;
     struct lyd_node *root = NULL;
     LY_ERR lyrc;
+
+    assert(config && config->schema && (config->schema->nodetype == LYS_ANYXML));
 
     if (!config->value.str) {
         /* nothing to do, no data */
@@ -653,6 +697,57 @@ filter_xpath_buf_add_top_content(const struct lyd_node *node, struct np2_filter 
     return 0;
 }
 
+static const struct lys_module *
+filter_xpath_print_node_module(const struct lyd_node *node)
+{
+    const struct lys_module *mod;
+    const struct lyd_node *parent;
+    const struct lyd_node_opaq *opaq, *opaq2;
+
+    parent = lyd_parent(node);
+
+    if (!parent) {
+        /* print the module */
+    } else if (node->schema && parent->schema) {
+        /* 2 data nodes */
+        if (node->schema->module == parent->schema->module) {
+            return NULL;
+        }
+    } else if (node->schema || parent->schema) {
+        /* 1 data node, 1 opaque node */
+        mod = node->schema ? node->schema->module : parent->schema->module;
+        opaq = node->schema ? (struct lyd_node_opaq *)parent : (struct lyd_node_opaq *)node;
+        assert(opaq->format == LY_VALUE_XML);
+
+        /* in dict */
+        if (mod->ns == opaq->name.module_ns) {
+            return NULL;
+        }
+    } else {
+        /* 2 opaque nodes */
+        opaq = (struct lyd_node_opaq *)node;
+        opaq2 = (struct lyd_node_opaq *)parent;
+
+        /* in dict */
+        if (opaq->name.module_ns == opaq2->name.module_ns) {
+            return NULL;
+        }
+    }
+
+    /* module will be printed, get it */
+    mod = NULL;
+    if (node->schema) {
+        mod = node->schema->module;
+    } else {
+        opaq = (struct lyd_node_opaq *)node;
+        if (opaq->name.module_ns) {
+            mod = ly_ctx_get_module_implemented_ns(LYD_CTX(node), opaq->name.module_ns);
+        }
+    }
+
+    return mod;
+}
+
 /* content node with optional namespace and attributes */
 static int
 filter_xpath_buf_append_content(const struct lyd_node *node, char **buf, int size)
@@ -661,12 +756,10 @@ filter_xpath_buf_append_content(const struct lyd_node *node, char **buf, int siz
     int new_size;
     char *buf_new, quot;
 
-    assert(node->schema && (node->schema->nodetype & (LYS_LEAF | LYS_LEAFLIST)));
+    assert(!node->schema || (node->schema->nodetype & (LYS_LEAF | LYS_LEAFLIST)));
 
     /* do we print the module name? */
-    if (!node->parent || (lyd_parent(node)->schema->module != node->schema->module)) {
-        mod = node->schema->module;
-    }
+    mod = filter_xpath_print_node_module(node);
 
     new_size = size + 1 + (mod ? strlen(mod->name) + 1 : 0) + strlen(LYD_NAME(node));
     buf_new = realloc(*buf, new_size);
@@ -706,31 +799,11 @@ static int
 filter_xpath_buf_append_node(const struct lyd_node *node, char **buf, int size)
 {
     const struct lys_module *mod = NULL;
-    const struct lyd_node_opaq *opaq;
     int new_size;
     char *buf_new;
 
-    assert(node->schema || !((struct lyd_node_opaq *)node)->value || strws(((struct lyd_node_opaq *)node)->value));
-
-    /* do we print the module? */
-    if (node->schema && (!node->parent || (lyd_parent(node)->schema->module != node->schema->module))) {
-        mod = node->schema->module;
-    } else if (!node->schema) {
-        opaq = (struct lyd_node_opaq *)node;
-        if (!opaq->name.module_ns) {
-            /* no namespace, will not match anything */
-            return 0;
-        }
-
-        mod = ly_ctx_get_module_implemented_ns(LYD_CTX(node), opaq->name.module_ns);
-        if (!mod) {
-            /* unknown namespace, will not match anything */
-        }
-
-        if (lyd_parent(node)->schema->module == mod) {
-            mod = NULL;
-        }
-    }
+    /* do we print the module name? */
+    mod = filter_xpath_print_node_module(node);
 
     new_size = size + 1 + (mod ? strlen(mod->name) + 1 : 0) + strlen(LYD_NAME(node));
     buf_new = realloc(*buf, new_size);
@@ -774,7 +847,7 @@ filter_xpath_buf_add_r(const struct lyd_node *node, char **buf, int size, struct
     /* append child content match nodes */
     only_content_match = 1;
     LY_LIST_FOR(lyd_child(node), child) {
-        if (child->schema && lyd_get_value(child) && !strws(lyd_get_value(child))) {
+        if (lyd_get_value(child) && !strws(lyd_get_value(child))) {
             /* there is a content filter, append all of them */
             size = filter_xpath_buf_append_content(child, buf, size);
             if (size < 1) {
@@ -837,6 +910,8 @@ op_filter_subtree2xpath(const struct lyd_node *node, struct np2_filter *filter)
             if (filter_xpath_buf_add_r(iter, &buf, 1, filter)) {
                 goto error;
             }
+        } else {
+            WRN("Skipping unsupported top-level filter node \"%s\".", LYD_NAME(iter));
         }
     }
 
